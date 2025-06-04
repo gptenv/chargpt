@@ -1,0 +1,16 @@
+chatgpt-warp-proxy/
+├── backend/
+│   ├── Dockerfile
+│   ├── index.js  <-- express app
+├── frontend/
+│   ├── ...
+├── utils/
+│   ├── curl/
+│   ├── browser-fetch/
+│   └── node-fetch/
+├── warp/
+│   └── Dockerfile  <-- wraps cloudflare warp client
+├── docker-compose.yml
+├── .env
+└── README.md
+

@@ -1,0 +1,28 @@
+#version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: chargpt_backend
+    env_file:
+      - .env
+    ports:
+      - "8842:8842"
+    depends_on:
+      - warp
+    networks:
+      - chargpt_net
+
+  warp:
+    build: ./warp
+    container_name: chargpt_warp
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - chargpt_net
+    restart: unless-stopped
+
+networks:
+  chargpt_net:
+    driver: bridge
+
