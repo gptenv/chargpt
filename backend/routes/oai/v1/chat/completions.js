@@ -3,7 +3,7 @@ import fetch from 'node-fetch';
 import { translateToChatGPT } from '../../../../lib/translator.js';
 import { adaptFromChatGPT } from '../../../../lib/responseAdapter.js';
 import { updateThread } from '../../../../lib/session.js';
-import { parseChatGPTStreamLine } from '../../../../lib/streamAdapter.js';
+import { parseChatGPTStreamLine, accumulateChatGPTStream } from '../../../../lib/streamAdapter.js';
 import { logProxy, logTranslit, logError } from '../../../../lib/logger.js';
 import { createMockResponse, shouldUseMock } from '../../../../lib/mockResponses.js';
 
@@ -46,39 +46,72 @@ router.post('/v1/chat/completions', async (req, res) => {
       timeout: TIMEOUT,
     });
 
-    if (!streamMode) {
-      logTranslit('Processing non-streaming response');
-      
-      const text = await gptRes.text();
-      const lines = text.trim().split('\n');
-      const last = lines.reverse().find((l) => l.startsWith('data: '));
-      const parsed = JSON.parse(last?.slice(6) || '{}');
+    if (!gptRes.ok) {
+      throw new Error(`ChatGPT backend responded with ${gptRes.status}: ${gptRes.statusText}`);
+    }
 
-      updateThread(req, parsed?.conversation_id, parsed?.message?.id);
+    if (!streamMode) {
+      // NON-STREAMING MODE: Accumulate the full stream then return as JSON
+      logTranslit('Processing non-streaming response (accumulating stream)');
+      
+      const result = await accumulateChatGPTStream(gptRes);
+      
+      if (!result.success) {
+        logError('TRANSLIT', 'Failed to accumulate ChatGPT stream', { error: result.error });
+        return res.status(502).json({
+          error: {
+            message: 'Failed to process ChatGPT response stream',
+            type: 'chargpt_stream_error',
+            code: 'stream_accumulation_failed',
+            chargpt_fallback: true
+          }
+        });
+      }
+
+      if (!result.messageId) {
+        logError('TRANSLIT', 'No valid message ID in ChatGPT response', result);
+        return res.status(502).json({
+          error: {
+            message: 'Invalid response from ChatGPT backend - missing message ID',
+            type: 'chargpt_response_invalid',
+            code: 'missing_message_id',
+            chargpt_fallback: true
+          }
+        });
+      }
+
+      // Update thread state
+      updateThread(req, result.conversationId, result.messageId);
 
       const response = {
-        id: parsed?.message?.id || 'chargpt-dummy-id',
+        id: `chatcmpl-${result.messageId}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: req.body.model || payload.model,
         choices: [{
           message: {
             role: 'assistant',
-            content: parsed?.message?.content?.parts?.[0] || '[empty]',
+            content: result.content || '',
           },
           index: 0,
           finish_reason: 'stop',
         }],
+        usage: {
+          prompt_tokens: 0, // ChatGPT doesn't provide this
+          completion_tokens: 0, // ChatGPT doesn't provide this
+          total_tokens: 0
+        }
       };
 
       logTranslit('Sending OpenAI-compatible response', { 
         responseId: response.id,
-        model: response.model 
+        model: response.model,
+        contentLength: result.content?.length || 0
       });
 
       res.status(200).json(response);
     } else {
-      // STREAMING MODE
+      // STREAMING MODE: Stream the response in real-time
       logTranslit('Starting streaming response');
       
       res.setHeader('Content-Type', 'text/event-stream');
@@ -87,48 +120,89 @@ router.post('/v1/chat/completions', async (req, res) => {
 
       const reader = gptRes.body.getReader();
       let buffer = '';
+      let messageId = null;
+      let conversationId = null;
+      let hasStarted = false;
 
       const decoder = new TextDecoder('utf-8');
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // Keep incomplete line in buffer
 
-        buffer = lines.pop(); // any incomplete line stays in buffer
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
 
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-
-          if (line.includes('[DONE]')) {
-            logTranslit('Stream completed');
-            res.write(`data: [DONE]\n\n`);
-            res.end();
-            return;
-          }
-
-          const content = parseChatGPTStreamLine(line);
-          if (content) {
-            res.write(`data: ${JSON.stringify({
-              choices: [{
-                delta: { content },
-                index: 0,
-                finish_reason: null,
-              }],
-            })}\n\n`);
-          }
-
-          try {
-            const parsed = JSON.parse(line.slice(6));
-            const convId = parsed?.conversation_id;
-            const msgId = parsed?.message?.id;
-            if (convId && msgId) {
-              updateThread(req, convId, msgId);
+            if (line.includes('[DONE]')) {
+              logTranslit('Stream completed');
+              
+              // Update thread state if we have the IDs
+              if (conversationId && messageId) {
+                updateThread(req, conversationId, messageId);
+              }
+              
+              res.write(`data: [DONE]\n\n`);
+              res.end();
+              return;
             }
-          } catch (_) {}
+
+            const content = parseChatGPTStreamLine(line);
+            if (content) {
+              if (!hasStarted) {
+                hasStarted = true;
+                logTranslit('First content chunk received, starting stream');
+              }
+              
+              res.write(`data: ${JSON.stringify({
+                id: messageId ? `chatcmpl-${messageId}` : 'chatcmpl-streaming',
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: req.body.model || payload.model,
+                choices: [{
+                  delta: { content },
+                  index: 0,
+                  finish_reason: null,
+                }],
+              })}\n\n`);
+            }
+
+            // Extract conversation and message IDs for thread management
+            try {
+              const parsed = JSON.parse(line.slice(6));
+              if (parsed.conversation_id) {
+                conversationId = parsed.conversation_id;
+              }
+              if (parsed.message?.id) {
+                messageId = parsed.message.id;
+              }
+            } catch (_) {
+              // Skip malformed lines
+            }
+          }
         }
+        
+        // If we reach here, stream ended without [DONE]
+        logTranslit('Stream ended without [DONE] marker');
+        if (conversationId && messageId) {
+          updateThread(req, conversationId, messageId);
+        }
+        res.write(`data: [DONE]\n\n`);
+        res.end();
+        
+      } catch (streamErr) {
+        logError('TRANSLIT', 'Error during streaming', streamErr);
+        res.write(`data: ${JSON.stringify({
+          error: {
+            message: 'Stream processing error',
+            type: 'chargpt_stream_error'
+          }
+        })}\n\n`);
+        res.end();
       }
     }
   } catch (err) {
