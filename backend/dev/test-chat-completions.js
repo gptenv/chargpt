@@ -27,7 +27,16 @@ async function runTest(name, testData) {
     console.log(`📤 ${request.method} ${url}`);
     
     const response = await fetch(url, options);
-    const data = await response.json();
+    let data;
+    const isStream = request?.body?.stream === true || request?.url?.includes('/stream');
+    if (isStream) {
+      const text = await response.text();
+      const lines = text.split('\n').filter(l => l.trim().startsWith('data: '));
+      const jsonLines = lines.map(l => l.replace(/^data: /, '').trim()).filter(l => l !== '[DONE]');
+      data = jsonLines.map(l => { try { return JSON.parse(l); } catch { return { error: 'Invalid JSON in stream' }; } });
+    } else {
+      data = await response.json();
+    }
 
     console.log(`📥 Status: ${response.status}`);
     console.log(`📋 Response:`, JSON.stringify(data, null, 2));
