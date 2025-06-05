@@ -1,0 +1,26 @@
+{
+  "description": "Mock request/response for streaming /v1/chat/completions",
+  "request": {
+    "method": "POST",
+    "url": "/v1/chat/completions",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer test-token"
+    },
+    "body": {
+      "model": "gpt-4",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello, this is a streaming test"
+        }
+      ],
+      "stream": true
+    }
+  },
+  "expected_response": {
+    "note": "This should return a stream of server-sent events",
+    "content_type": "text/event-stream",
+    "format": "Multiple data: {...} chunks followed by data: [DONE]"
+  }
+}

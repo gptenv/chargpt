@@ -1,0 +1,27 @@
+{
+  "description": "Mock request/response for /v1/models",
+  "request": {
+    "method": "GET",
+    "url": "/v1/models",
+    "headers": {
+      "Authorization": "Bearer test-token"
+    }
+  },
+  "expected_response": {
+    "object": "list",
+    "data": [
+      {
+        "id": "gpt-4",
+        "object": "model",
+        "created": 1677649420,
+        "owned_by": "openai"
+      },
+      {
+        "id": "gpt-3.5-turbo",
+        "object": "model",
+        "created": 1677649420,
+        "owned_by": "openai"
+      }
+    ]
+  }
+}
