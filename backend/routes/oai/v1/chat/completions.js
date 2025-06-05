@@ -9,7 +9,7 @@ import { createMockResponse, shouldUseMock } from '../../../../lib/mockResponses
 
 const router = express.Router();
 
-export default ({ BASE, AUTH, UA, agent }) => {
+export default ({ BASE, AUTH, UA, agent, TIMEOUT = 30000 }) => {
 
 router.post('/v1/chat/completions', async (req, res) => {
   logTranslit('Received OpenAI chat completion request', { 
@@ -43,6 +43,7 @@ router.post('/v1/chat/completions', async (req, res) => {
       headers,
       body: JSON.stringify(payload),
       agent,
+      timeout: TIMEOUT,
     });
 
     if (!streamMode) {
@@ -135,12 +136,43 @@ router.post('/v1/chat/completions', async (req, res) => {
     
     // Use mock response if backend is unavailable
     if (shouldUseMock(err)) {
-      const mockResponse = createMockResponse('/v1/chat/completions', req.body);
-      logTranslit('Returning mock chat completion response', { 
-        responseId: mockResponse.id,
-        model: mockResponse.model 
-      });
-      return res.json(mockResponse);
+      if (streamMode) {
+        // Handle streaming mock response
+        const mockChunks = createMockResponse('/v1/chat/completions/stream', req.body);
+        logTranslit('Returning mock streaming chat completion response', { 
+          chunkCount: mockChunks.length,
+          model: req.body.model
+        });
+
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+
+        // Send chunks with delay to simulate streaming
+        let chunkIndex = 0;
+        const sendChunk = () => {
+          if (chunkIndex < mockChunks.length) {
+            const chunk = mockChunks[chunkIndex];
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+            chunkIndex++;
+            setTimeout(sendChunk, 50); // 50ms delay between chunks
+          } else {
+            res.write(`data: [DONE]\n\n`);
+            res.end();
+          }
+        };
+        
+        sendChunk();
+        return;
+      } else {
+        // Handle non-streaming mock response
+        const mockResponse = createMockResponse('/v1/chat/completions', req.body);
+        logTranslit('Returning mock chat completion response', { 
+          responseId: mockResponse.id,
+          model: mockResponse.model 
+        });
+        return res.json(mockResponse);
+      }
     }
     
     res.status(500).json({ 

@@ -17,6 +17,7 @@ const BASE = process.env.CHARGPT_API_BASE || 'https://chatgpt.com';
 const PROXY = process.env.CHARGPT_PROXY_URL;
 const AUTH = process.env.CHARGPT_ACCESS_TOKEN;
 const UA = process.env.CHARGPT_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0';
+const TIMEOUT = parseInt(process.env.CHARGPT_TIMEOUT || '30000', 10); // 30 second default timeout
 
 // Log configuration in debug mode
 logProxy('Starting CharGPT backend', {
@@ -24,15 +25,16 @@ logProxy('Starting CharGPT backend', {
   BASE,
   PROXY: PROXY ? 'configured' : 'none',
   AUTH: AUTH ? 'configured' : 'none',
-  UA: UA ? 'configured' : 'default'
+  UA: UA ? 'configured' : 'default',
+  TIMEOUT: `${TIMEOUT}ms`
 });
 
 const agent = PROXY ? new SocksProxyAgent(PROXY) : undefined;
 
 // Mount the OpenAI-compatible endpoint(s)
-app.use(completionsRoute({ BASE, AUTH, UA, agent }));
-app.use(modelsRoute({ BASE, AUTH, UA, agent }));
-app.use(userRoute({ BASE, AUTH, UA, agent }));
+app.use(completionsRoute({ BASE, AUTH, UA, agent, TIMEOUT }));
+app.use(modelsRoute({ BASE, AUTH, UA, agent, TIMEOUT }));
+app.use(userRoute({ BASE, AUTH, UA, agent, TIMEOUT }));
 
 // Health check endpoint
 app.get('/health', (req, res) => {

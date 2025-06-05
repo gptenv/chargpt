@@ -5,7 +5,7 @@ import { createMockResponse, shouldUseMock } from '../../../lib/mockResponses.js
 
 const router = express.Router();
 
-export default ({ BASE, AUTH, UA, agent }) => {
+export default ({ BASE, AUTH, UA, agent, TIMEOUT = 30000 }) => {
 
 // Handle multiple user profile endpoints
 const userEndpoints = ['/v1/me', '/v1/whoami', '/v1/profile'];
@@ -32,8 +32,8 @@ userEndpoints.forEach(endpoint => {
 
       // Fetch both endpoints concurrently
       const [meRes, settingsRes] = await Promise.allSettled([
-        fetch(meUrl, { method: 'GET', headers, agent }),
-        fetch(settingsUrl, { method: 'GET', headers, agent })
+        fetch(meUrl, { method: 'GET', headers, agent, timeout: TIMEOUT }),
+        fetch(settingsUrl, { method: 'GET', headers, agent, timeout: TIMEOUT })
       ]);
 
       let meData = null;

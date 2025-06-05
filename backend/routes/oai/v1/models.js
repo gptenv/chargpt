@@ -5,7 +5,7 @@ import { createMockResponse, shouldUseMock } from '../../../lib/mockResponses.js
 
 const router = express.Router();
 
-export default ({ BASE, AUTH, UA, agent }) => {
+export default ({ BASE, AUTH, UA, agent, TIMEOUT = 30000 }) => {
 
 router.get('/v1/models', async (req, res) => {
   logTranslit('Received OpenAI models request');
@@ -24,6 +24,7 @@ router.get('/v1/models', async (req, res) => {
       method: 'GET',
       headers,
       agent,
+      timeout: TIMEOUT,
     });
 
     if (!gptRes.ok) {

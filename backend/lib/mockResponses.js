@@ -26,6 +26,46 @@ export function createMockResponse(endpoint, requestData = null) {
         },
       };
 
+    case '/v1/chat/completions/stream':
+      logMock('Generating mock streaming chat completion response');
+      // Return an array of streaming chunks
+      const mockContent = 'Hello! This is a mock streaming response from CharGPT proxy. The real ChatGPT backend is not available, but the proxy is working correctly.';
+      const words = mockContent.split(' ');
+      const chunks = [];
+      
+      let currentContent = '';
+      for (let i = 0; i < words.length; i++) {
+        currentContent += (i > 0 ? ' ' : '') + words[i];
+        chunks.push({
+          id: `chatcmpl-mock-${Date.now()}`,
+          object: 'chat.completion.chunk',
+          created: timestamp,
+          model: requestData?.model || 'gpt-4',
+          choices: [{
+            index: 0,
+            delta: {
+              content: (i > 0 ? ' ' : '') + words[i],
+            },
+            finish_reason: null,
+          }],
+        });
+      }
+      
+      // Final chunk
+      chunks.push({
+        id: `chatcmpl-mock-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: timestamp,
+        model: requestData?.model || 'gpt-4',
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: 'stop',
+        }],
+      });
+      
+      return chunks;
+
     case '/v1/models':
       logMock('Generating mock models response');
       return {
@@ -82,6 +122,9 @@ export function shouldUseMock(error) {
   return error.code === 'EAI_AGAIN' || 
          error.code === 'ENOTFOUND' || 
          error.code === 'ECONNREFUSED' ||
+         error.code === 'ETIMEDOUT' ||
+         error.name === 'TimeoutError' ||
          error.message?.includes('getaddrinfo') ||
-         error.message?.includes('failed');
+         error.message?.includes('failed') ||
+         error.message?.includes('timeout');
 }
