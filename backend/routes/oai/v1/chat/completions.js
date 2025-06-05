@@ -1,11 +1,13 @@
 import express from 'express';
 import fetch from 'node-fetch';
+import crypto from 'crypto';
 import { translateToChatGPT } from '../../../../lib/translator.js';
 import { adaptFromChatGPT } from '../../../../lib/responseAdapter.js';
 import { updateThread } from '../../../../lib/session.js';
+import SessionManager from '../../../../lib/session/manager.js';
 // Simple helper functions per Tuesday's specification
 
-async function proxyAndRelayStream({ from, to, req, payload }) {
+async function proxyAndRelayStream({ from, to, req, payload, token, threadHash }) {
   logTranslit('Starting direct stream relay');
   
   to.setHeader('Content-Type', 'text/event-stream');
@@ -34,6 +36,9 @@ async function proxyAndRelayStream({ from, to, req, payload }) {
           // Update thread state if we have the IDs
           if (conversationId && messageId) {
             updateThread(req, conversationId, messageId);
+            if (token && threadHash) {
+              await sessionManager.storeConversation(token, threadHash, conversationId);
+            }
           }
           to.write(`data: [DONE]\n\n`);
           to.end();
@@ -73,6 +78,9 @@ async function proxyAndRelayStream({ from, to, req, payload }) {
     // Stream ended without [DONE]
     if (conversationId && messageId) {
       updateThread(req, conversationId, messageId);
+      if (token && threadHash) {
+        await sessionManager.storeConversation(token, threadHash, conversationId);
+      }
     }
     to.write(`data: [DONE]\n\n`);
     to.end();
@@ -149,7 +157,7 @@ async function accumulateStream(gptRes) {
   };
 }
 
-function convertToOpenAIFormat(fullResponse, req, payload) {
+async function convertToOpenAIFormat(fullResponse, req, payload, token, threadHash) {
   if (!fullResponse.success || !fullResponse.messageId) {
     logError('TRANSLIT', 'Failed to accumulate valid response', fullResponse);
     throw new Error('Invalid response from ChatGPT backend');
@@ -157,6 +165,9 @@ function convertToOpenAIFormat(fullResponse, req, payload) {
 
   // Update thread state
   updateThread(req, fullResponse.conversationId, fullResponse.messageId);
+  if (token && threadHash && fullResponse.conversationId) {
+    await sessionManager.storeConversation(token, threadHash, fullResponse.conversationId);
+  }
 
   const response = {
     id: `chatcmpl-${fullResponse.messageId}`,
@@ -178,6 +189,12 @@ function convertToOpenAIFormat(fullResponse, req, payload) {
     }
   };
 
+  const pure = process.env.CHARGPT_OAI_PURE_RESPONSE === 'true';
+  if (!pure) {
+    response.conversation_id = fullResponse.conversationId;
+  }
+  response.model_kwargs = { conversation_id: fullResponse.conversationId };
+
   logTranslit('Converted to OpenAI format', { 
     responseId: response.id,
     model: response.model,
@@ -190,15 +207,35 @@ import { logProxy, logTranslit, logError } from '../../../../lib/logger.js';
 import { createMockResponse, shouldUseMock } from '../../../../lib/mockResponses.js';
 
 const router = express.Router();
+const sessionManager = new SessionManager();
 
 export default ({ BASE, AUTH, UA, agent, TIMEOUT = 30000 }) => {
 
 router.post('/v1/chat/completions', async (req, res) => {
-  logTranslit('Received OpenAI chat completion request', { 
-    stream: req.body.stream, 
+  logTranslit('Received OpenAI chat completion request', {
+    stream: req.body.stream,
     model: req.body.model,
-    messageCount: req.body.messages?.length 
+    messageCount: req.body.messages?.length
   });
+
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const threadHash = crypto.createHash('sha256').update(JSON.stringify(req.body.messages || [])).digest('hex');
+
+  if (token) {
+    await sessionManager.touchSession(token, threadHash);
+  }
+
+  let convId;
+  if (Object.prototype.hasOwnProperty.call(req.body, 'conversation_id')) {
+    convId = req.body.conversation_id || undefined;
+  } else if (req.body.model_kwargs && Object.prototype.hasOwnProperty.call(req.body.model_kwargs, 'conversation_id')) {
+    convId = req.body.model_kwargs.conversation_id || undefined;
+  }
+
+  if (convId === undefined && token) {
+    convId = await sessionManager.getConversation(token, threadHash);
+  }
 
   const url = new URL('/backend-api/conversation', BASE).href;
   const headers = {
@@ -208,7 +245,7 @@ router.post('/v1/chat/completions', async (req, res) => {
     'Accept': 'text/event-stream',
   };
 
-  const payload = translateToChatGPT(req.body, req);
+  const payload = translateToChatGPT(req.body, req, convId);
   const streamMode = req.body.stream === true;
 
   logTranslit('Translated to ChatGPT format', { 
@@ -234,13 +271,13 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     if (streamMode) {
       // STREAMING MODE: Fast path - pipe ChatGPT stream → OpenAI stream
-      return proxyAndRelayStream({ from: gptRes, to: res, req, payload });
+      return proxyAndRelayStream({ from: gptRes, to: res, req, payload, token, threadHash });
     } else {
       // NON-STREAMING MODE: Slow path - accumulate, parse, convert to OpenAI format
       const fullResponse = await accumulateStream(gptRes);
       
       try {
-        const oaiResponse = convertToOpenAIFormat(fullResponse, req, payload);
+        const oaiResponse = await convertToOpenAIFormat(fullResponse, req, payload, token, threadHash);
         return res.json(oaiResponse);
       } catch (convertErr) {
         logError('TRANSLIT', 'Failed to convert ChatGPT response to OpenAI format', convertErr);

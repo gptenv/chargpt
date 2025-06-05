@@ -133,14 +133,11 @@ Use mocked tokens:
 
 ### 🔧 To Do (in order)
 
-1. Implement `session/manager.js`
-2. Build `session/store.js` and adapters
-3. Wire into `chat/completions.js`:
-
-   * Read: incoming token & conversation\_id
-   * Write: backend-returned conversation\_id
-4. Inject response conversation\_id appropriately
-5. Add test suites
+1. Add integration tests covering session persistence across restarts
+2. Implement `/v1/session/inspect` debug endpoint
+3. Improve adapter error handling and reconnection logic
+4. Document session configuration options in README
+5. Add tests covering conversation_id forwarding and storage rules
 
 ---
 

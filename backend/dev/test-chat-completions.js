@@ -53,6 +53,10 @@ async function runTest(name, testData) {
       if (expected_response.choices && data.choices) {
         console.log(`✅ Response has choices array`);
       }
+
+      if (expected_response.conversation_id && data.conversation_id) {
+        console.log(`✅ conversation_id present: ${data.conversation_id}`);
+      }
       
       if (expected_response.data && data.data) {
         console.log(`✅ Response has data array with ${data.data.length} items`);
