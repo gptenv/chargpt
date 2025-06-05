@@ -1,6 +1,6 @@
 #!/bin/bash
 sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get dist-upgrade -y && sudo apt-get autoremove 
-sudo apt-get install -y apt-utils nodejs
+sudo apt-get install -y apt-utils nodejs fuse-overlayfs
 pushd backend
 npm i
 popd
