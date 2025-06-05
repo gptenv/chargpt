@@ -3,7 +3,189 @@ import fetch from 'node-fetch';
 import { translateToChatGPT } from '../../../../lib/translator.js';
 import { adaptFromChatGPT } from '../../../../lib/responseAdapter.js';
 import { updateThread } from '../../../../lib/session.js';
-import { parseChatGPTStreamLine, accumulateChatGPTStream } from '../../../../lib/streamAdapter.js';
+// Simple helper functions per Tuesday's specification
+
+async function proxyAndRelayStream({ from, to, req, payload }) {
+  logTranslit('Starting direct stream relay');
+  
+  to.setHeader('Content-Type', 'text/event-stream');
+  to.setHeader('Cache-Control', 'no-cache');
+  to.setHeader('Connection', 'keep-alive');
+
+  const reader = from.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let messageId = null;
+  let conversationId = null;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+
+        if (line.includes('[DONE]')) {
+          // Update thread state if we have the IDs
+          if (conversationId && messageId) {
+            updateThread(req, conversationId, messageId);
+          }
+          to.write(`data: [DONE]\n\n`);
+          to.end();
+          return;
+        }
+
+        // Transform ChatGPT line to OpenAI format and send immediately
+        try {
+          const parsed = JSON.parse(line.slice(6));
+          
+          // Extract IDs for thread management
+          if (parsed.conversation_id) conversationId = parsed.conversation_id;
+          if (parsed.message?.id) messageId = parsed.message.id;
+
+          // Extract content and transform to OpenAI format
+          const content = parsed.message?.content?.parts?.[0];
+          if (content) {
+            const oaiChunk = {
+              id: messageId ? `chatcmpl-${messageId}` : 'chatcmpl-streaming',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: req.body.model || payload.model,
+              choices: [{
+                delta: { content },
+                index: 0,
+                finish_reason: null,
+              }],
+            };
+            to.write(`data: ${JSON.stringify(oaiChunk)}\n\n`);
+          }
+        } catch (_) {
+          // Skip malformed lines
+        }
+      }
+    }
+    
+    // Stream ended without [DONE]
+    if (conversationId && messageId) {
+      updateThread(req, conversationId, messageId);
+    }
+    to.write(`data: [DONE]\n\n`);
+    to.end();
+    
+  } catch (streamErr) {
+    logError('TRANSLIT', 'Error during stream relay', streamErr);
+    to.write(`data: ${JSON.stringify({
+      error: {
+        message: 'Stream processing error',
+        type: 'chargpt_stream_error'
+      }
+    })}\n\n`);
+    to.end();
+  }
+}
+
+async function accumulateStream(gptRes) {
+  logTranslit('Accumulating ChatGPT stream for non-streaming response');
+  
+  const reader = gptRes.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let conversationId = null;
+  let messageId = null;
+  let fullContent = '';
+  let lastValidMessage = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // Keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      
+      if (line.includes('[DONE]')) {
+        return {
+          conversationId,
+          messageId: lastValidMessage?.message?.id || messageId,
+          content: lastValidMessage?.message?.content?.parts?.[0] || fullContent,
+          success: true
+        };
+      }
+
+      try {
+        const parsed = JSON.parse(line.slice(6));
+        
+        if (parsed.conversation_id) conversationId = parsed.conversation_id;
+        if (parsed.message?.id) {
+          messageId = parsed.message.id;
+          lastValidMessage = parsed;
+        }
+
+        // ChatGPT sends the full content each time, not deltas
+        const contentPart = parsed.message?.content?.parts?.[0];
+        if (contentPart && typeof contentPart === 'string') {
+          fullContent = contentPart;
+        }
+      } catch (_) {
+        // Skip malformed lines
+      }
+    }
+  }
+
+  // Stream ended without [DONE]
+  return {
+    conversationId,
+    messageId: lastValidMessage?.message?.id || messageId,
+    content: lastValidMessage?.message?.content?.parts?.[0] || fullContent,
+    success: fullContent.length > 0
+  };
+}
+
+function convertToOpenAIFormat(fullResponse, req, payload) {
+  if (!fullResponse.success || !fullResponse.messageId) {
+    logError('TRANSLIT', 'Failed to accumulate valid response', fullResponse);
+    throw new Error('Invalid response from ChatGPT backend');
+  }
+
+  // Update thread state
+  updateThread(req, fullResponse.conversationId, fullResponse.messageId);
+
+  const response = {
+    id: `chatcmpl-${fullResponse.messageId}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: req.body.model || payload.model,
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: fullResponse.content || '',
+      },
+      index: 0,
+      finish_reason: 'stop',
+    }],
+    usage: {
+      prompt_tokens: 0, // ChatGPT doesn't provide this
+      completion_tokens: 0, // ChatGPT doesn't provide this
+      total_tokens: 0
+    }
+  };
+
+  logTranslit('Converted to OpenAI format', { 
+    responseId: response.id,
+    model: response.model,
+    contentLength: fullResponse.content?.length || 0
+  });
+
+  return response;
+}
 import { logProxy, logTranslit, logError } from '../../../../lib/logger.js';
 import { createMockResponse, shouldUseMock } from '../../../../lib/mockResponses.js';
 
@@ -50,159 +232,26 @@ router.post('/v1/chat/completions', async (req, res) => {
       throw new Error(`ChatGPT backend responded with ${gptRes.status}: ${gptRes.statusText}`);
     }
 
-    if (!streamMode) {
-      // NON-STREAMING MODE: Accumulate the full stream then return as JSON
-      logTranslit('Processing non-streaming response (accumulating stream)');
-      
-      const result = await accumulateChatGPTStream(gptRes);
-      
-      if (!result.success) {
-        logError('TRANSLIT', 'Failed to accumulate ChatGPT stream', { error: result.error });
-        return res.status(502).json({
-          error: {
-            message: 'Failed to process ChatGPT response stream',
-            type: 'chargpt_stream_error',
-            code: 'stream_accumulation_failed',
-            chargpt_fallback: true
-          }
-        });
-      }
-
-      if (!result.messageId) {
-        logError('TRANSLIT', 'No valid message ID in ChatGPT response', result);
-        return res.status(502).json({
-          error: {
-            message: 'Invalid response from ChatGPT backend - missing message ID',
-            type: 'chargpt_response_invalid',
-            code: 'missing_message_id',
-            chargpt_fallback: true
-          }
-        });
-      }
-
-      // Update thread state
-      updateThread(req, result.conversationId, result.messageId);
-
-      const response = {
-        id: `chatcmpl-${result.messageId}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: req.body.model || payload.model,
-        choices: [{
-          message: {
-            role: 'assistant',
-            content: result.content || '',
-          },
-          index: 0,
-          finish_reason: 'stop',
-        }],
-        usage: {
-          prompt_tokens: 0, // ChatGPT doesn't provide this
-          completion_tokens: 0, // ChatGPT doesn't provide this
-          total_tokens: 0
-        }
-      };
-
-      logTranslit('Sending OpenAI-compatible response', { 
-        responseId: response.id,
-        model: response.model,
-        contentLength: result.content?.length || 0
-      });
-
-      res.status(200).json(response);
+    if (streamMode) {
+      // STREAMING MODE: Fast path - pipe ChatGPT stream → OpenAI stream
+      return proxyAndRelayStream({ from: gptRes, to: res, req, payload });
     } else {
-      // STREAMING MODE: Stream the response in real-time
-      logTranslit('Starting streaming response');
+      // NON-STREAMING MODE: Slow path - accumulate, parse, convert to OpenAI format
+      const fullResponse = await accumulateStream(gptRes);
       
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const reader = gptRes.body.getReader();
-      let buffer = '';
-      let messageId = null;
-      let conversationId = null;
-      let hasStarted = false;
-
-      const decoder = new TextDecoder('utf-8');
-
       try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop(); // Keep incomplete line in buffer
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-
-            if (line.includes('[DONE]')) {
-              logTranslit('Stream completed');
-              
-              // Update thread state if we have the IDs
-              if (conversationId && messageId) {
-                updateThread(req, conversationId, messageId);
-              }
-              
-              res.write(`data: [DONE]\n\n`);
-              res.end();
-              return;
-            }
-
-            const content = parseChatGPTStreamLine(line);
-            if (content) {
-              if (!hasStarted) {
-                hasStarted = true;
-                logTranslit('First content chunk received, starting stream');
-              }
-              
-              res.write(`data: ${JSON.stringify({
-                id: messageId ? `chatcmpl-${messageId}` : 'chatcmpl-streaming',
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: req.body.model || payload.model,
-                choices: [{
-                  delta: { content },
-                  index: 0,
-                  finish_reason: null,
-                }],
-              })}\n\n`);
-            }
-
-            // Extract conversation and message IDs for thread management
-            try {
-              const parsed = JSON.parse(line.slice(6));
-              if (parsed.conversation_id) {
-                conversationId = parsed.conversation_id;
-              }
-              if (parsed.message?.id) {
-                messageId = parsed.message.id;
-              }
-            } catch (_) {
-              // Skip malformed lines
-            }
-          }
-        }
-        
-        // If we reach here, stream ended without [DONE]
-        logTranslit('Stream ended without [DONE] marker');
-        if (conversationId && messageId) {
-          updateThread(req, conversationId, messageId);
-        }
-        res.write(`data: [DONE]\n\n`);
-        res.end();
-        
-      } catch (streamErr) {
-        logError('TRANSLIT', 'Error during streaming', streamErr);
-        res.write(`data: ${JSON.stringify({
+        const oaiResponse = convertToOpenAIFormat(fullResponse, req, payload);
+        return res.json(oaiResponse);
+      } catch (convertErr) {
+        logError('TRANSLIT', 'Failed to convert ChatGPT response to OpenAI format', convertErr);
+        return res.status(502).json({
           error: {
-            message: 'Stream processing error',
-            type: 'chargpt_stream_error'
+            message: 'Invalid response from ChatGPT backend',
+            type: 'chargpt_response_invalid',
+            code: 'conversion_failed',
+            chargpt_fallback: true
           }
-        })}\n\n`);
-        res.end();
+        });
       }
     }
   } catch (err) {
@@ -249,13 +298,25 @@ router.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    res.status(500).json({ 
+    // Return structured error response
+    const errorResponse = {
       error: {
-        message: err.message,
+        message: 'Failed to process ChatGPT response',
         type: 'chargpt_proxy_error',
-        code: err.code || 'unknown_error'
+        code: err.code || 'unknown_error',
+        chargpt_fallback: true
       }
-    });
+    };
+    
+    if (streamMode) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.write(`data: ${JSON.stringify(errorResponse)}\n\n`);
+      res.end();
+    } else {
+      res.status(502).json(errorResponse);
+    }
   }
 });
 
