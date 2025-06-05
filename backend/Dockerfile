@@ -3,7 +3,7 @@ FROM node:24-slim
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN if [ ! -f "package.json" ]; then npm init -y; fi; npm i
 
 COPY . .
 

@@ -1,51 +1,39 @@
-// index.js
 import express from 'express';
-import dotenv from 'dotenv';
-import bodyParser from 'body-parser';
 import fetch from 'node-fetch';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import dotenv from 'dotenv';
+import dotenvExpand from 'dotenv-expand';
 
-dotenv.config();
+dotenvExpand.expand(dotenv.config());
 
 const app = express();
+app.use(express.json());
+
 const PORT = process.env.CHARGPT_PORT || 8842;
+const BASE = process.env.CHARGPT_API_BASE || 'https://chat.openai.com';
+const PROXY = process.env.CHARGPT_PROXY_URL || null;
+const AUTH = process.env.CHARGPT_ACCESS_TOKEN;
+const UA = process.env.CHARGPT_USER_AGENT || 'Mozilla/5.0';
 
-const BASE_URL = process.env.CHARGPT_BACKEND_API_URL || 'https://chat.openai.com/backend-api/conversation';
-const ACCESS_TOKEN = process.env.CHARGPT_ACCESS_TOKEN || null;
+const agent = PROXY ? new SocksProxyAgent(PROXY) : undefined;
 
-if (!ACCESS_TOKEN) {
-  console.warn('[WARN] CHARGPT_ACCESS_TOKEN not set. Requests will fail unless you fix your life.');
-}
-
-app.use(bodyParser.json());
-
-app.post('/v1/chat/completions', async (req, res) => {
-  console.log('[REQ] /v1/chat/completions', JSON.stringify(req.body, null, 2));
-
-  const mappedPayload = {
-    action: 'next',
-    messages: req.body.messages || [],
-    model: req.body.model || 'gpt-4',
-    parent_message_id: req.body.parent_message_id || crypto.randomUUID(),
-    // More translation here later
-  };
-
+// Temporary test route – you’ll replace this with the OpenAI-compatible /v1/chat/completions handler
+app.get('/ping-gpt', async (req, res) => {
   try {
-    const response = await fetch(BASE_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${ACCESS_TOKEN}`,
-        'Content-Type': 'application/json',
-        'User-Agent': process.env.CHARGPT_USER_AGENT || 'Mozilla/5.0 (CharGPT)',
-      },
-      body: JSON.stringify(mappedPayload),
-    });
+    const url = new URL('/backend-api/models', BASE).href;
+    const headers = {
+      'User-Agent': UA,
+      'Accept': '*/*',
+      'Authorization': `Bearer ${AUTH}`,
+    };
 
-    const text = await response.text();
+    const response = await fetch(url, { headers, agent });
+    const body = await response.text();
 
-    res.status(response.status).send(text);
-  } catch (error) {
-    console.error('[ERROR]', error);
-    res.status(500).json({ error: 'Proxy request failed', details: error.message });
+    res.status(200).send(body);
+  } catch (err) {
+    console.error('Fetch error:', err);
+    res.status(500).send('Fetch failed: ' + err.message);
   }
 });
 

@@ -1,14 +1,28 @@
 #!/bin/bash
-
 set -e
 
-warp-cli --accept-tos register
-warp-cli --accept-tos set-mode warp
-warp-cli --accept-tos connect
+# Start the daemon first
+warp-svc --log-level error &
+sleep 2
 
-# Just to show IP routing works (dev only, comment later)
-ip a
+# Only register if no registration exists yet
+if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
+  echo "[INFO] No registration found, creating new..."
+  warp-cli --accept-tos registration new
+else
+  echo "[INFO] Existing registration detected, skipping re-registration."
+fi
 
-# Keep container alive
+warp-cli --accept-tos mode proxy
+
+# No more set-mode — Cloudflare now manages it internally
+# Just connect
+warp-cli --accept-tos connect || true
+
+# Wait and inspect status
+sleep 2
+warp-cli --accept-tos status
+
+# Live forever like a docker demon
 tail -f /dev/null
 

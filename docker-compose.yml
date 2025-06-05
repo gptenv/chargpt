@@ -1,26 +1,54 @@
 #version: '3.8'
 
+name: chargpt
 services:
   backend:
+    image: gptenv/chargpt-backend:latest
     build: ./backend
-    container_name: chargpt_backend
+    container_name: chargpt-backend
+    environment:
+      - PROXY_URL=socks5h://warp:1080
     env_file:
       - .env
     ports:
       - "8842:8842"
     depends_on:
-      - warp
+      warp:
+        condition: service_healthy
     networks:
       - chargpt_net
+    restart: always
 
   warp:
+    image: gptenv/chargpt-warp:latest
     build: ./warp
-    container_name: chargpt_warp
+    container_name: chargpt-warp
+    environment:
+      - WARP_SLEEP=5
     cap_add:
       - NET_ADMIN
+      - SYS_MODULE
+      - MKNOD
+      - AUDIT_WRITE
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
     networks:
       - chargpt_net
-    restart: unless-stopped
+    ports:
+      #- "1080"
+      - "8844:1080"
+    volumes:
+      - ./warp/warp_state_cache:/var/lib/cloudflare-warp
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "https://www.google.com"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
 
 networks:
   chargpt_net:

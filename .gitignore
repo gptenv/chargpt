@@ -1,1 +1,8 @@
 .env
+package-lock.json
+
+node_modules/
+
+warp/warp_state_cache/*
+warp/etc/*
+
