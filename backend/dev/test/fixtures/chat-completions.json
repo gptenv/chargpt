@@ -1,0 +1,37 @@
+{
+  "description": "Mock request/response for /v1/chat/completions",
+  "request": {
+    "method": "POST",
+    "url": "/v1/chat/completions",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer test-token"
+    },
+    "body": {
+      "model": "gpt-4",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello, this is a test message"
+        }
+      ],
+      "stream": false
+    }
+  },
+  "expected_response": {
+    "id": "chatcmpl-test-id",
+    "object": "chat.completion",
+    "created": 1677649420,
+    "model": "gpt-4",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Hello! This is a mock response from the CharGPT proxy."
+        },
+        "finish_reason": "stop"
+      }
+    ]
+  }
+}

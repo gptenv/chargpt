@@ -4,12 +4,20 @@ import { translateToChatGPT } from '../../../../lib/translator.js';
 import { adaptFromChatGPT } from '../../../../lib/responseAdapter.js';
 import { updateThread } from '../../../../lib/session.js';
 import { parseChatGPTStreamLine } from '../../../../lib/streamAdapter.js';
+import { logProxy, logTranslit, logError } from '../../../../lib/logger.js';
+import { createMockResponse, shouldUseMock } from '../../../../lib/mockResponses.js';
 
 const router = express.Router();
 
 export default ({ BASE, AUTH, UA, agent }) => {
 
 router.post('/v1/chat/completions', async (req, res) => {
+  logTranslit('Received OpenAI chat completion request', { 
+    stream: req.body.stream, 
+    model: req.body.model,
+    messageCount: req.body.messages?.length 
+  });
+
   const url = new URL('/backend-api/conversation', BASE).href;
   const headers = {
     'User-Agent': UA,
@@ -21,7 +29,15 @@ router.post('/v1/chat/completions', async (req, res) => {
   const payload = translateToChatGPT(req.body, req);
   const streamMode = req.body.stream === true;
 
+  logTranslit('Translated to ChatGPT format', { 
+    action: payload.action,
+    model: payload.model,
+    streamMode 
+  });
+
   try {
+    logProxy('Making request to ChatGPT backend', { url });
+    
     const gptRes = await fetch(url, {
       method: 'POST',
       headers,
@@ -30,6 +46,8 @@ router.post('/v1/chat/completions', async (req, res) => {
     });
 
     if (!streamMode) {
+      logTranslit('Processing non-streaming response');
+      
       const text = await gptRes.text();
       const lines = text.trim().split('\n');
       const last = lines.reverse().find((l) => l.startsWith('data: '));
@@ -37,11 +55,11 @@ router.post('/v1/chat/completions', async (req, res) => {
 
       updateThread(req, parsed?.conversation_id, parsed?.message?.id);
 
-      res.status(200).json({
+      const response = {
         id: parsed?.message?.id || 'chargpt-dummy-id',
         object: 'chat.completion',
-        created: Date.now(),
-        model: payload.model,
+        created: Math.floor(Date.now() / 1000),
+        model: req.body.model || payload.model,
         choices: [{
           message: {
             role: 'assistant',
@@ -50,9 +68,18 @@ router.post('/v1/chat/completions', async (req, res) => {
           index: 0,
           finish_reason: 'stop',
         }],
+      };
+
+      logTranslit('Sending OpenAI-compatible response', { 
+        responseId: response.id,
+        model: response.model 
       });
+
+      res.status(200).json(response);
     } else {
       // STREAMING MODE
+      logTranslit('Starting streaming response');
+      
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -75,6 +102,7 @@ router.post('/v1/chat/completions', async (req, res) => {
           if (!line.startsWith('data: ')) continue;
 
           if (line.includes('[DONE]')) {
+            logTranslit('Stream completed');
             res.write(`data: [DONE]\n\n`);
             res.end();
             return;
@@ -103,10 +131,28 @@ router.post('/v1/chat/completions', async (req, res) => {
       }
     }
   } catch (err) {
-    console.error('CharGPT stream error:', err);
-    res.status(500).json({ error: err.message });
+    logError('TRANSLIT', 'ChatGPT completion error', err);
+    
+    // Use mock response if backend is unavailable
+    if (shouldUseMock(err)) {
+      const mockResponse = createMockResponse('/v1/chat/completions', req.body);
+      logTranslit('Returning mock chat completion response', { 
+        responseId: mockResponse.id,
+        model: mockResponse.model 
+      });
+      return res.json(mockResponse);
+    }
+    
+    res.status(500).json({ 
+      error: {
+        message: err.message,
+        type: 'chargpt_proxy_error',
+        code: err.code || 'unknown_error'
+      }
+    });
   }
 });
 
+return router;
 };
 
